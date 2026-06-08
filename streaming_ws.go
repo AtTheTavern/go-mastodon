@@ -7,9 +7,16 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+// DefaultWSReadTimeout is the time allowed without receiving any WebSocket
+// frame (including Pong responses) before the connection is considered dead.
+// Mastodon servers send Ping frames approximately every 30 seconds, so 90s
+// allows for 2-3 missed Pongs before detecting a dead connection.
+var DefaultWSReadTimeout = 90 * time.Second
 
 // WSClient is a WebSocket client.
 type WSClient struct {
@@ -99,6 +106,21 @@ func (c *WSClient) handleWS(ctx context.Context, rawurl string, q chan Event) er
 		return err
 	}
 
+	readTimeout := DefaultWSReadTimeout
+
+	// Set an initial read deadline so that a dead connection is detected
+	// even if no data frames are received.
+	conn.SetReadDeadline(time.Now().Add(readTimeout))
+
+	// Set a PongHandler that resets the read deadline each time a Pong is
+	// received. Mastodon servers send Ping frames approximately every 30s;
+	// gorilla/websocket auto-responds with Pong, so the server's Ping and
+	// our Pong response keep the connection alive at the protocol level.
+	conn.SetPongHandler(func(appData string) error {
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
+		return nil
+	})
+
 	// Close the WebSocket when the context is canceled.
 	go func() {
 		<-ctx.Done()
@@ -123,6 +145,9 @@ func (c *WSClient) handleWS(ctx context.Context, rawurl string, q chan Event) er
 			// Reconnect.
 			break
 		}
+
+		// Reset read deadline after each successful read.
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
 
 		err = nil
 		switch s.Event {
@@ -210,3 +235,4 @@ func changeWebSocketScheme(rawurl string) (*url.URL, error) {
 
 	return u, nil
 }
+
